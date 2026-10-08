@@ -44,6 +44,7 @@ struct spout_source {
 	int render_status;
 	int tick_status;
 	SPOUTHANDLE spout_receiver_ptr;
+	gs_texrender_t *linear_texrender;
 };
 
 /**
@@ -155,11 +156,13 @@ static void win_spout_source_deinit(void *data)
 {
 	struct spout_source *context = (spout_source *)data;
 	context->initialized = false;
-	if (context->texture) {
+	if (context->texture || context->linear_texrender) {
 		obs_enter_graphics();
 		gs_texture_destroy(context->texture);
+		gs_texrender_destroy(context->linear_texrender);
 		obs_leave_graphics();
 		context->texture = NULL;
+		context->linear_texrender = NULL;
 	}
 }
 
@@ -260,6 +263,57 @@ static uint32_t win_spout_source_getheight(void *data)
 	return context->height;
 }
 
+/**
+ * On 10-bit and HDR canvases OBS blends in linear space, but the shared texture
+ * holds sRGB values and can't be sampled through an sRGB view, so decode it into
+ * a 16F texture first. premultiplied_alpha.effect has no DrawSrgbDecompress
+ * technique, which is why this isn't done in the draw call itself.
+ */
+static gs_texture_t *win_spout_source_linearize(spout_source *context)
+{
+	const enum gs_color_space space = gs_get_color_space();
+	if (space == GS_CS_SRGB)
+		return context->texture; // sRGB canvas, no decode needed
+
+	const enum gs_color_format format = gs_texture_get_color_format(context->texture);
+	if (format == GS_RGBA16F || format == GS_RGBA32F)
+		return context->texture; // float senders are already linear
+
+	const char *tech_name = "DrawSrgbDecompress";
+	float multiplier = 1.0f;
+	if (space == GS_CS_709_SCRGB) {
+		tech_name = "DrawSrgbDecompressMultiply";
+		multiplier = obs_get_video_sdr_white_level() / 80.0f;
+	}
+
+	if (!context->linear_texrender)
+		context->linear_texrender = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
+	if (!context->linear_texrender)
+		return context->texture;
+
+	const uint32_t cx = gs_texture_get_width(context->texture);
+	const uint32_t cy = gs_texture_get_height(context->texture);
+
+	gs_texrender_reset(context->linear_texrender);
+	if (!gs_texrender_begin(context->linear_texrender, cx, cy))
+		return context->texture;
+
+	gs_effect_t *const conv = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	const bool previous_srgb = gs_framebuffer_srgb_enabled();
+	gs_enable_framebuffer_srgb(false);
+	gs_enable_blending(false);
+	gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+	gs_effect_set_texture(gs_effect_get_param_by_name(conv, "image"), context->texture);
+	gs_effect_set_float(gs_effect_get_param_by_name(conv, "multiplier"), multiplier);
+	while (gs_effect_loop(conv, tech_name))
+		gs_draw_sprite(context->texture, 0, 0, 0);
+	gs_enable_blending(true);
+	gs_enable_framebuffer_srgb(previous_srgb);
+	gs_texrender_end(context->linear_texrender);
+
+	return gs_texrender_get_texture(context->linear_texrender);
+}
+
 static void win_spout_source_render(void *data, gs_effect_t *effect)
 {
 	struct spout_source *context = (spout_source *)data;
@@ -309,8 +363,10 @@ static void win_spout_source_render(void *data, gs_effect_t *effect)
 		break;
 	}
 
+	gs_texture_t *const texture = win_spout_source_linearize(context);
+
 	while (gs_effect_loop(effect, "Draw")) {
-		obs_source_draw(context->texture, 0, 0, 0, 0, false);
+		obs_source_draw(texture, 0, 0, 0, 0, false);
 	}
 
 	if (context->composite_mode == COMPOSITE_MODE_PREMULTIPLIED) {
