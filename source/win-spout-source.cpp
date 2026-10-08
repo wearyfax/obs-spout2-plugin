@@ -65,6 +65,30 @@ static bool win_spout_source_store_sender_info(spout_source *context)
 	return true;
 }
 
+// Names for the DXGI formats Spout senders commonly use. DirectX 9 senders
+// report 0, and their texture is always D3DFMT_A8R8G8B8.
+static const char *win_spout_format_name(DWORD format)
+{
+	switch (format) {
+	case 0:
+		return "DirectX 9 sender (8-bit BGRA)";
+	case 10:
+		return "R16G16B16A16_FLOAT (16-bit float)";
+	case 11:
+		return "R16G16B16A16_UNORM (16-bit)";
+	case 24:
+		return "R10G10B10A2_UNORM (10-bit)";
+	case 28:
+		return "R8G8B8A8_UNORM (8-bit)";
+	case 87:
+		return "B8G8R8A8_UNORM (8-bit)";
+	case 91:
+		return "B8G8R8A8_UNORM_SRGB (8-bit)";
+	default:
+		return "unrecognised";
+	}
+}
+
 static void win_spout_source_init(void *data, bool forced = false)
 {
 	struct spout_source *context = (spout_source *)data;
@@ -141,7 +165,8 @@ static void win_spout_source_init(void *data, bool forced = false)
 	if (!win_spout_source_store_sender_info(context)) {
 		warn("Named %s sender not found", context->senderName);
 	} else {
-		info("Sender %s is of dimensions %d x %d", context->senderName, context->width, context->height);
+		info("Sender %s is of dimensions %d x %d, format %lu: %s", context->senderName, context->width,
+		     context->height, context->dxFormat, win_spout_format_name(context->dxFormat));
 	};
 
 	obs_enter_graphics();
